@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from app.db.models import DiscussionMetric, PipelineJob, Source, SourceDiscussion
 from app.services.github_client import GitHubDiscussion
 from app.services.scraper import ScraperService
-from tests.helpers import make_test_session
+from app.tests.helpers import make_test_session
 
 
 class FakeGitHubClient:
@@ -27,6 +27,27 @@ class FakeGitHubClient:
         ]
 
 
+class FakeOrganizationGitHubClient:
+    def fetch_recent_discussions(self, owner, repo, created_since, include_comments=False):
+        assert owner == "community"
+        assert repo == "community"
+        return [
+            GitHubDiscussion(
+                github_discussion_id="OD_123",
+                repo_full_name="community/community",
+                discussion_number=11,
+                title="Org discussion",
+                author_login="octocat",
+                category_name="General",
+                comments_count=4,
+                upvote_count=6,
+                html_url="https://github.com/orgs/community/discussions/11",
+                discussion_created_at=datetime(2026, 1, 1),
+                discussion_updated_at=datetime(2026, 1, 2),
+            )
+        ]
+
+
 def test_scrape_source_upserts_discussion_metric_mapping_and_job(tmp_path):
     session_factory = make_test_session(tmp_path)
     db = session_factory()
@@ -44,6 +65,34 @@ def test_scrape_source_upserts_discussion_metric_mapping_and_job(tmp_path):
         db.refresh(source)
 
         job = ScraperService(FakeGitHubClient()).scrape_source(db, source)
+
+        assert job.status == "done"
+        assert job.discussions_found == 1
+        assert job.discussions_new == 1
+        assert db.query(DiscussionMetric).count() == 1
+        assert db.query(SourceDiscussion).count() == 1
+        assert db.query(PipelineJob).count() == 1
+    finally:
+        db.close()
+
+
+def test_scrape_organization_discussions_source_upserts_metrics(tmp_path):
+    session_factory = make_test_session(tmp_path)
+    db = session_factory()
+    try:
+        source = Source(
+            source_type="organization_discussions",
+            identifier="community",
+            is_active=True,
+            is_accessible=True,
+            include_comments=False,
+            created_at=datetime.now(UTC).replace(tzinfo=None),
+        )
+        db.add(source)
+        db.commit()
+        db.refresh(source)
+
+        job = ScraperService(FakeOrganizationGitHubClient()).scrape_source(db, source)
 
         assert job.status == "done"
         assert job.discussions_found == 1

@@ -1,7 +1,7 @@
 from sqlalchemy import inspect
 from sqlalchemy import text
 
-from tests.helpers import make_test_session
+from app.tests.helpers import make_test_session
 
 
 def test_existing_schema_tables_are_available(tmp_path):

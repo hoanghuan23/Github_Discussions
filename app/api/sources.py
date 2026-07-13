@@ -9,7 +9,11 @@ from app.db.models import Source
 from app.db.schemas import ScrapeResult, SourceCreate, SourceRead
 from app.db.session import get_db
 from app.services.scraper import ScraperService
-from app.services.source_parser import SOURCE_TYPE_REPOSITORY, parse_source
+from app.services.source_parser import (
+    SOURCE_TYPE_ORGANIZATION_DISCUSSIONS,
+    SOURCE_TYPE_REPOSITORY,
+    parse_source,
+)
 
 
 router = APIRouter(prefix="/sources", tags=["sources"])
@@ -56,7 +60,7 @@ def create_source(payload: SourceCreate, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(source)
 
-    if source.source_type == SOURCE_TYPE_REPOSITORY:
+    if source.source_type in {SOURCE_TYPE_REPOSITORY, SOURCE_TYPE_ORGANIZATION_DISCUSSIONS}:
         try:
             job = ScraperService().scrape_source(db, source)
         except Exception as exc:

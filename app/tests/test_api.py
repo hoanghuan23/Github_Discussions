@@ -2,10 +2,11 @@ from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 
-from app.db.models import Discussion, PipelineJob, Source
+from app.db.models import Discussion, DiscussionMetric, PipelineJob, Source
 from app.db.session import get_db
 from app.main import app
-from tests.helpers import make_test_session
+from app.services.github_client import GitHubDiscussion
+from app.tests.helpers import make_test_session
 
 
 def test_health_and_list_endpoints(tmp_path):
@@ -120,7 +121,7 @@ def test_create_source_reuses_existing_identifier(tmp_path, monkeypatch):
         app.dependency_overrides.clear()
 
 
-def test_create_source_detects_organization_discussions_without_scrape(tmp_path):
+def test_create_source_crawls_discussions_and_metrics(tmp_path, monkeypatch):
     session_factory = make_test_session(tmp_path)
 
     def override_get_db():
@@ -130,6 +131,92 @@ def test_create_source_detects_organization_discussions_without_scrape(tmp_path)
         finally:
             db.close()
 
+    class FakeGitHubClient:
+        def fetch_recent_discussions(
+            self, owner, repo, created_since, include_comments=False
+        ):
+            assert owner == "community"
+            assert repo == "community"
+            return [
+                GitHubDiscussion(
+                    github_discussion_id="D_community_1",
+                    repo_full_name="community/community",
+                    discussion_number=42,
+                    title="Welcome discussion",
+                    author_login="octocat",
+                    category_name="General",
+                    comments_count=5,
+                    upvote_count=9,
+                    html_url="https://github.com/community/community/discussions/42",
+                    discussion_created_at=datetime(2026, 1, 1),
+                    discussion_updated_at=datetime(2026, 1, 2),
+                )
+            ]
+
+    monkeypatch.setattr("app.services.scraper.GitHubGraphQLClient", FakeGitHubClient)
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/sources",
+            json={"url": "https://github.com/community/community/discussions"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["job"]["status"] == "done"
+        assert body["job"]["discussions_found"] == 1
+        assert body["job"]["discussions_new"] == 1
+
+        db = session_factory()
+        try:
+            discussion = db.query(Discussion).one()
+            metric = db.query(DiscussionMetric).one()
+
+            assert discussion.repo_full_name == "community/community"
+            assert discussion.discussion_number == 42
+            assert discussion.comments_count == 5
+            assert discussion.upvote_count == 9
+            assert metric.discussion_id == discussion.id
+            assert metric.comments_count == 5
+            assert metric.upvote_count == 9
+        finally:
+            db.close()
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_create_source_crawls_organization_discussions(tmp_path, monkeypatch):
+    session_factory = make_test_session(tmp_path)
+
+    def override_get_db():
+        db = session_factory()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    class FakeGitHubClient:
+        def fetch_recent_discussions(self, owner, repo, created_since, include_comments=False):
+            assert owner == "community"
+            assert repo == "community"
+            return [
+                GitHubDiscussion(
+                    github_discussion_id="OD_community_1",
+                    repo_full_name="community/community",
+                    discussion_number=7,
+                    title="Org welcome discussion",
+                    author_login="octocat",
+                    category_name="General",
+                    comments_count=2,
+                    upvote_count=4,
+                    html_url="https://github.com/orgs/community/discussions/7",
+                    discussion_created_at=datetime(2026, 1, 1),
+                    discussion_updated_at=datetime(2026, 1, 2),
+                )
+            ]
+
+    monkeypatch.setattr("app.services.scraper.GitHubGraphQLClient", FakeGitHubClient)
     app.dependency_overrides[get_db] = override_get_db
     try:
         client = TestClient(app)
@@ -140,8 +227,20 @@ def test_create_source_detects_organization_discussions_without_scrape(tmp_path)
 
         assert response.status_code == 200
         body = response.json()
-        assert body["job"] is None
+        assert body["job"]["status"] == "done"
+        assert body["job"]["discussions_found"] == 1
         assert body["source"]["source_type"] == "organization_discussions"
         assert body["source"]["identifier"] == "community"
+
+        db = session_factory()
+        try:
+            discussion = db.query(Discussion).one()
+            metric = db.query(DiscussionMetric).one()
+
+            assert discussion.repo_full_name == "community/community"
+            assert discussion.discussion_number == 7
+            assert metric.discussion_id == discussion.id
+        finally:
+            db.close()
     finally:
         app.dependency_overrides.clear()

@@ -7,7 +7,11 @@ from app.core.config import settings
 from app.db.models import Discussion, PipelineJob, Source
 from app.repositories.discussions import upsert_discussion
 from app.services.github_client import GitHubGraphQLClient
-from app.services.source_parser import SOURCE_TYPE_REPOSITORY, split_repo_identifier
+from app.services.source_parser import (
+    SOURCE_TYPE_ORGANIZATION_DISCUSSIONS,
+    SOURCE_TYPE_REPOSITORY,
+    split_repo_identifier,
+)
 
 
 def utcnow() -> datetime:
@@ -19,8 +23,11 @@ class ScraperService:
         self.client = client or GitHubGraphQLClient()
 
     def scrape_source(self, db: Session, source: Source) -> PipelineJob:
-        if source.source_type != SOURCE_TYPE_REPOSITORY:
-            raise ValueError("V1 only supports repository sources")
+        if source.source_type not in {
+            SOURCE_TYPE_REPOSITORY,
+            SOURCE_TYPE_ORGANIZATION_DISCUSSIONS,
+        }:
+            raise ValueError("Scraping only supports repository and organization discussions")
 
         now = utcnow()
         job = PipelineJob(
@@ -38,8 +45,12 @@ class ScraperService:
         db.flush()
 
         try:
-            owner, repo = split_repo_identifier(source.identifier)
             created_since = now - timedelta(hours=settings.lookback_hours)
+            if source.source_type == SOURCE_TYPE_REPOSITORY:
+                owner, repo = split_repo_identifier(source.identifier)
+            else:
+                owner = source.identifier
+                repo = source.identifier
             items = self.client.fetch_recent_discussions(
                 owner,
                 repo,
