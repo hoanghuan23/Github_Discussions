@@ -11,6 +11,7 @@ from app.db.session import get_db
 from app.services.scraper import ScraperService
 from app.services.source_parser import (
     SOURCE_TYPE_ORGANIZATION_DISCUSSIONS,
+    SOURCE_TYPE_ORGANIZATION_REPOSITORIES,
     SOURCE_TYPE_REPOSITORY,
     parse_source,
 )
@@ -60,7 +61,11 @@ def create_source(payload: SourceCreate, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(source)
 
-    if source.source_type in {SOURCE_TYPE_REPOSITORY, SOURCE_TYPE_ORGANIZATION_DISCUSSIONS}:
+    if source.source_type in {
+        SOURCE_TYPE_REPOSITORY,
+        SOURCE_TYPE_ORGANIZATION_DISCUSSIONS,
+        SOURCE_TYPE_ORGANIZATION_REPOSITORIES,
+    }:
         try:
             job = ScraperService().scrape_source(db, source)
         except Exception as exc:

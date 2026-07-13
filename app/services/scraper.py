@@ -9,6 +9,7 @@ from app.repositories.discussions import upsert_discussion
 from app.services.github_client import GitHubGraphQLClient
 from app.services.source_parser import (
     SOURCE_TYPE_ORGANIZATION_DISCUSSIONS,
+    SOURCE_TYPE_ORGANIZATION_REPOSITORIES,
     SOURCE_TYPE_REPOSITORY,
     split_repo_identifier,
 )
@@ -26,8 +27,12 @@ class ScraperService:
         if source.source_type not in {
             SOURCE_TYPE_REPOSITORY,
             SOURCE_TYPE_ORGANIZATION_DISCUSSIONS,
+            SOURCE_TYPE_ORGANIZATION_REPOSITORIES,
         }:
-            raise ValueError("Scraping only supports repository and organization discussions")
+            raise ValueError(
+                "Scraping only supports repository, organization discussions, "
+                "and organization repositories"
+            )
 
         now = utcnow()
         job = PipelineJob(
@@ -46,32 +51,37 @@ class ScraperService:
 
         try:
             created_since = now - timedelta(hours=settings.lookback_hours)
-            if source.source_type == SOURCE_TYPE_REPOSITORY:
-                owner, repo = split_repo_identifier(source.identifier)
-            else:
-                owner = source.identifier
-                repo = source.identifier
-            items = self.client.fetch_recent_discussions(
-                owner,
-                repo,
-                created_since=created_since,
-                include_comments=source.include_comments,
-            )
+            if source.source_type == SOURCE_TYPE_ORGANIZATION_REPOSITORIES:
+                repositories = self.client.fetch_discussion_enabled_repositories(
+                    source.identifier
+                )
+                for repository in repositories:
+                    owner, repo = split_repo_identifier(repository.name_with_owner)
+                    try:
+                        items = self.client.fetch_recent_discussions(
+                            owner,
+                            repo,
+                            created_since=created_since,
+                            include_comments=source.include_comments,
+                        )
+                    except Exception:
+                        job.items_failed += 1
+                        continue
 
-            for item in items:
-                _, created = upsert_discussion(
-                    db,
-                    source_id=source.id,
-                    item=item,
-                    job_id=job.id,
-                    now=now,
+                    self._upsert_items(db, source, job, items, now)
+            else:
+                if source.source_type == SOURCE_TYPE_REPOSITORY:
+                    owner, repo = split_repo_identifier(source.identifier)
+                else:
+                    owner = source.identifier
+                    repo = source.identifier
+                items = self.client.fetch_recent_discussions(
+                    owner,
+                    repo,
+                    created_since=created_since,
                     include_comments=source.include_comments,
                 )
-                job.discussions_found += 1
-                if created:
-                    job.discussions_new += 1
-                else:
-                    job.discussions_updated += 1
+                self._upsert_items(db, source, job, items, now)
 
             source.is_accessible = True
             source.last_scraped = now
@@ -92,6 +102,29 @@ class ScraperService:
             db.commit()
             db.refresh(job)
             raise
+
+    def _upsert_items(
+        self,
+        db: Session,
+        source: Source,
+        job: PipelineJob,
+        items,
+        now: datetime,
+    ) -> None:
+        for item in items:
+            _, created = upsert_discussion(
+                db,
+                source_id=source.id,
+                item=item,
+                job_id=job.id,
+                now=now,
+                include_comments=source.include_comments,
+            )
+            job.discussions_found += 1
+            if created:
+                job.discussions_new += 1
+            else:
+                job.discussions_updated += 1
 
     def update_due_metrics(self, db: Session) -> PipelineJob:
         now = utcnow()

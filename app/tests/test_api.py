@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from app.db.models import Discussion, DiscussionMetric, PipelineJob, Source
 from app.db.session import get_db
 from app.main import app
-from app.services.github_client import GitHubDiscussion
+from app.services.github_client import GitHubDiscussion, GitHubRepository
 from app.tests.helpers import make_test_session
 
 
@@ -239,6 +239,78 @@ def test_create_source_crawls_organization_discussions(tmp_path, monkeypatch):
 
             assert discussion.repo_full_name == "community/community"
             assert discussion.discussion_number == 7
+            assert metric.discussion_id == discussion.id
+        finally:
+            db.close()
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_create_source_crawls_organization_repositories(tmp_path, monkeypatch):
+    session_factory = make_test_session(tmp_path)
+
+    def override_get_db():
+        db = session_factory()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    class FakeGitHubClient:
+        def fetch_discussion_enabled_repositories(self, organization):
+            assert organization == "vercel"
+            return [
+                GitHubRepository(
+                    name="next.js",
+                    name_with_owner="vercel/next.js",
+                    has_discussions_enabled=True,
+                )
+            ]
+
+        def fetch_recent_discussions(
+            self, owner, repo, created_since, include_comments=False
+        ):
+            assert owner == "vercel"
+            assert repo == "next.js"
+            return [
+                GitHubDiscussion(
+                    github_discussion_id="D_vercel_next_recent",
+                    repo_full_name="vercel/next.js",
+                    discussion_number=95735,
+                    title="Recent Vercel discussion",
+                    author_login="octocat",
+                    category_name="General",
+                    comments_count=1,
+                    upvote_count=2,
+                    html_url="https://github.com/vercel/next.js/discussions/95735",
+                    discussion_created_at=datetime(2026, 7, 13),
+                    discussion_updated_at=datetime(2026, 7, 13),
+                )
+            ]
+
+    monkeypatch.setattr("app.services.scraper.GitHubGraphQLClient", FakeGitHubClient)
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/sources",
+            json={"url": "https://github.com/orgs/vercel/repositories"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["job"]["status"] == "done"
+        assert body["job"]["discussions_found"] == 1
+        assert body["source"]["source_type"] == "organization_repositories"
+        assert body["source"]["identifier"] == "vercel"
+
+        db = session_factory()
+        try:
+            discussion = db.query(Discussion).one()
+            metric = db.query(DiscussionMetric).one()
+
+            assert discussion.repo_full_name == "vercel/next.js"
+            assert discussion.discussion_number == 95735
             assert metric.discussion_id == discussion.id
         finally:
             db.close()

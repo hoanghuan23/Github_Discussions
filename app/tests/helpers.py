@@ -17,8 +17,9 @@ def make_test_session(tmp_path):
     raw = engine.raw_connection()
     try:
         raw.executescript(
-            (ROOT_DIR / "data" / "schema_table_github_discussions_minimal.sql")
-            .read_text(encoding="utf-8")
+            (ROOT_DIR / "data" / "schema_table_github_discussions.sql").read_text(
+                encoding="utf-8"
+            )
         )
         raw.commit()
     finally:

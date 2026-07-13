@@ -31,6 +31,13 @@ class GitHubDiscussion:
     comments: list[GitHubComment] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class GitHubRepository:
+    name: str
+    name_with_owner: str
+    has_discussions_enabled: bool
+
+
 DISCUSSIONS_QUERY = """
 query($owner: String!, $repo: String!, $first: Int!, $after: String, $commentsFirst: Int!) {
   repository(owner: $owner, name: $repo) {
@@ -66,6 +73,24 @@ query($owner: String!, $repo: String!, $first: Int!, $after: String, $commentsFi
             }
           }
         }
+      }
+    }
+  }
+}
+"""
+
+ORGANIZATION_REPOSITORIES_QUERY = """
+query($organization: String!, $first: Int!, $after: String) {
+  organization(login: $organization) {
+    repositories(first: $first, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        name
+        nameWithOwner
+        hasDiscussionsEnabled
       }
     }
   }
@@ -177,6 +202,62 @@ class GitHubGraphQLClient:
             after = page_info["endCursor"]
 
         return found
+
+    def fetch_discussion_enabled_repositories(
+        self,
+        organization: str,
+    ) -> list[GitHubRepository]:
+        if not self.token:
+            raise RuntimeError("GITHUB_TOKEN is required to crawl GitHub Discussions")
+
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        page_size = settings.github_page_size
+        after = None
+        repositories: list[GitHubRepository] = []
+
+        while True:
+            response = requests.post(
+                self.endpoint,
+                headers=headers,
+                json={
+                    "query": ORGANIZATION_REPOSITORIES_QUERY,
+                    "variables": {
+                        "organization": organization,
+                        "first": page_size,
+                        "after": after,
+                    },
+                },
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if data.get("errors"):
+                raise RuntimeError(data["errors"])
+
+            org = data.get("data", {}).get("organization")
+            if not org:
+                raise RuntimeError("GitHub organization not found or inaccessible")
+
+            connection = org["repositories"]
+            for node in connection["nodes"] or []:
+                if node["hasDiscussionsEnabled"]:
+                    repositories.append(
+                        GitHubRepository(
+                            name=node["name"],
+                            name_with_owner=node["nameWithOwner"],
+                            has_discussions_enabled=True,
+                        )
+                    )
+
+            page_info = connection["pageInfo"]
+            if not page_info["hasNextPage"]:
+                break
+            after = page_info["endCursor"]
+
+        return repositories
 
     def _parse_discussion(self, repo_full_name: str, item: dict) -> GitHubDiscussion:
         comments = []

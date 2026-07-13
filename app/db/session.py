@@ -30,7 +30,7 @@ def init_db() -> None:
     if inspector.has_table("sources"):
         return
 
-    schema_path = ROOT_DIR / "data" / "schema_table_github_discussions_minimal.sql"
+    schema_path = ROOT_DIR / "data" / "schema_table_github_discussions.sql"
     if not schema_path.exists():
         raise RuntimeError(f"Schema file not found: {schema_path}")
 
