@@ -3,7 +3,6 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.db.models import (
     Discussion,
     DiscussionComment,
@@ -13,8 +12,17 @@ from app.db.models import (
 from app.services.github_client import GitHubDiscussion
 
 
+METRIC_UPDATE_INTERVAL_MINUTES = {
+    "hot": 15,
+    "high": 20,
+    "medium": 45,
+    "low": 90,
+    "very_low": 180,
+}
+
+
 def metric_tier(comments_count: int, upvote_count: int) -> str:
-    score = comments_count + upvote_count
+    score = comments_count * 3 + upvote_count
     if score >= 100:
         return "hot"
     if score >= 50:
@@ -48,9 +56,8 @@ def upsert_discussion(
         )
 
     created = discussion is None
-    next_metric_update = now + timedelta(
-        minutes=settings.default_metric_interval_minutes
-    )
+    tier = metric_tier(item.comments_count, item.upvote_count)
+    next_metric_update = now + timedelta(minutes=METRIC_UPDATE_INTERVAL_MINUTES[tier])
 
     if created:
         discussion = Discussion(
@@ -71,7 +78,7 @@ def upsert_discussion(
             is_deleted=False,
             last_metric_update=now,
             next_metric_update=next_metric_update,
-            metric_tier=metric_tier(item.comments_count, item.upvote_count),
+            metric_tier=tier,
         )
         db.add(discussion)
         db.flush()
@@ -87,7 +94,7 @@ def upsert_discussion(
         discussion.is_deleted = False
         discussion.last_metric_update = now
         discussion.next_metric_update = next_metric_update
-        discussion.metric_tier = metric_tier(item.comments_count, item.upvote_count)
+        discussion.metric_tier = tier
 
     if source_id is not None:
         link = db.get(
