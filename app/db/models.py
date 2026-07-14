@@ -53,7 +53,7 @@ class Discussion(Base):
         UniqueConstraint("github_discussion_id"),
         UniqueConstraint("repo_full_name", "discussion_number"),
         CheckConstraint(
-            "metric_tier IN ('hot', 'high', 'medium', 'low', 'very_low', 'bootstrap')",
+            "metric_tier IN ('hot', 'high', 'medium', 'low', 'very_low')",
             name="ck_discussions_metric_tier",
         ),
     )
@@ -77,7 +77,7 @@ class Discussion(Base):
     is_deleted = Column(Boolean, nullable=False, default=False)
     last_metric_update = Column(DateTime)
     next_metric_update = Column(DateTime)
-    metric_tier = Column(String(20), nullable=False, default="bootstrap")
+    metric_tier = Column(String(20), nullable=False, default="very_low")
 
     source = relationship("Source", back_populates="discussions")
     metrics = relationship("DiscussionMetric", back_populates="discussion")
