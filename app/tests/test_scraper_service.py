@@ -8,7 +8,11 @@ from app.db.models import (
     Source,
     SourceDiscussion,
 )
-from app.services.github_client import GitHubDiscussion, GitHubRepository
+from app.services.github_client import (
+    GitHubDiscussion,
+    GitHubDiscussionMetrics,
+    GitHubRepository,
+)
 from app.services.scraper import ScraperService
 from app.tests.helpers import make_test_session
 
@@ -105,28 +109,48 @@ class SequencedGitHubClient:
         return [item]
 
 
+class RecordingGitHubClient:
+    def __init__(self, items=None):
+        self.items = items or []
+        self.calls = []
+
+    def fetch_recent_discussions(self, owner, repo, created_since, include_comments=False):
+        self.calls.append(
+            {
+                "owner": owner,
+                "repo": repo,
+                "created_since": created_since,
+                "include_comments": include_comments,
+            }
+        )
+        return self.items
+
+
+class RecordingOrganizationRepositoriesClient(RecordingGitHubClient):
+    def fetch_discussion_enabled_repositories(self, organization):
+        assert organization == "vercel"
+        return [
+            GitHubRepository(
+                name="next.js",
+                name_with_owner="vercel/next.js",
+                has_discussions_enabled=True,
+            ),
+            GitHubRepository(
+                name="turborepo",
+                name_with_owner="vercel/turborepo",
+                has_discussions_enabled=True,
+            ),
+        ]
+
+
 class PartiallyFailingMetricClient:
-    def fetch_discussion_by_number(
-        self,
-        owner,
-        repo,
-        discussion_number,
-        include_comments=False,
-    ):
-        if discussion_number == 1:
+    def fetch_discussion_metrics_by_id(self, github_discussion_id):
+        if github_discussion_id == "D_metric_fail":
             raise RuntimeError("temporary GitHub error")
-        return GitHubDiscussion(
+        return GitHubDiscussionMetrics(
             github_discussion_id="D_metric_success",
-            repo_full_name="vercel/next.js",
-            discussion_number=2,
-            title="Metric success updated",
-            author_login="octocat",
-            category_name="General",
             comments_count=12,
             upvote_count=8,
-            html_url="https://github.com/vercel/next.js/discussions/2",
-            discussion_created_at=datetime(2026, 1, 1),
-            discussion_updated_at=datetime(2026, 1, 3),
         )
 
 
@@ -174,44 +198,55 @@ def test_update_due_metrics_continues_after_discussion_error(tmp_path, monkeypat
         )
         db.add(source)
         db.flush()
+        discussions = [
+            Discussion(
+                github_discussion_id="D_metric_fail",
+                source_id=source.id,
+                repo_full_name="vercel/next.js",
+                discussion_number=1,
+                title="Metric fail",
+                comments_count=1,
+                upvote_count=1,
+                html_url="https://github.com/vercel/next.js/discussions/1",
+                discussion_created_at=now - timedelta(days=1),
+                discussion_updated_at=now - timedelta(days=1),
+                created_at=now - timedelta(days=1),
+                is_tracked=True,
+                is_deleted=False,
+                last_metric_update=now - timedelta(hours=2),
+                next_metric_update=now - timedelta(seconds=1),
+                metric_tier="very_low",
+            ),
+            Discussion(
+                github_discussion_id="D_metric_success",
+                source_id=source.id,
+                repo_full_name="vercel/next.js",
+                discussion_number=2,
+                title="Metric success",
+                comments_count=2,
+                upvote_count=2,
+                html_url="https://github.com/vercel/next.js/discussions/2",
+                discussion_created_at=now - timedelta(days=1),
+                discussion_updated_at=now - timedelta(days=1),
+                created_at=now - timedelta(days=1),
+                is_tracked=True,
+                is_deleted=False,
+                last_metric_update=now - timedelta(hours=2),
+                next_metric_update=now - timedelta(seconds=1),
+                metric_tier="very_low",
+            ),
+        ]
+        db.add_all(discussions)
+        db.flush()
         db.add_all(
             [
-                Discussion(
-                    github_discussion_id="D_metric_fail",
+                SourceDiscussion(
                     source_id=source.id,
-                    repo_full_name="vercel/next.js",
-                    discussion_number=1,
-                    title="Metric fail",
-                    comments_count=1,
-                    upvote_count=1,
-                    html_url="https://github.com/vercel/next.js/discussions/1",
-                    discussion_created_at=now - timedelta(days=1),
-                    discussion_updated_at=now - timedelta(days=1),
-                    created_at=now - timedelta(days=1),
-                    is_tracked=True,
-                    is_deleted=False,
-                    last_metric_update=now - timedelta(hours=2),
-                    next_metric_update=now - timedelta(seconds=1),
-                    metric_tier="very_low",
-                ),
-                Discussion(
-                    github_discussion_id="D_metric_success",
-                    source_id=source.id,
-                    repo_full_name="vercel/next.js",
-                    discussion_number=2,
-                    title="Metric success",
-                    comments_count=2,
-                    upvote_count=2,
-                    html_url="https://github.com/vercel/next.js/discussions/2",
-                    discussion_created_at=now - timedelta(days=1),
-                    discussion_updated_at=now - timedelta(days=1),
-                    created_at=now - timedelta(days=1),
-                    is_tracked=True,
-                    is_deleted=False,
-                    last_metric_update=now - timedelta(hours=2),
-                    next_metric_update=now - timedelta(seconds=1),
-                    metric_tier="very_low",
-                ),
+                    discussion_id=discussion.id,
+                    first_seen_at=discussion.discussion_created_at,
+                    last_seen_at=discussion.discussion_created_at,
+                )
+                for discussion in discussions
             ]
         )
         db.commit()
@@ -229,6 +264,10 @@ def test_update_due_metrics_continues_after_discussion_error(tmp_path, monkeypat
         assert job.discussions_updated == 1
         assert job.items_failed == 1
         assert success.comments_count == 12
+        assert success.upvote_count == 8
+        assert success.title == "Metric success"
+        assert success.html_url == "https://github.com/vercel/next.js/discussions/2"
+        assert success.discussion_number == 2
         assert db.query(DiscussionMetric).count() == 1
     finally:
         db.close()
@@ -335,6 +374,159 @@ def test_scrape_source_refreshes_daily_analytics_cache_and_source_tier(
         assert caches[1].total_upvotes == 100
         assert source.schedule_tier == 4
         assert source.next_scrape == crawl_times[2] + timedelta(minutes=60)
+    finally:
+        db.close()
+
+
+def test_new_discussions_uses_latest_created_at_as_crawl_boundary(
+    tmp_path,
+    monkeypatch,
+):
+    session_factory = make_test_session(tmp_path)
+    db = session_factory()
+    now = datetime(2026, 7, 14, 10, 0, 0)
+    latest_created_at = datetime(2026, 7, 14, 9, 30, 0)
+    try:
+        source = Source(
+            source_type="repository",
+            identifier="vercel/next.js",
+            is_active=True,
+            is_accessible=True,
+            include_comments=False,
+            created_at=now,
+        )
+        db.add(source)
+        db.flush()
+        discussion = Discussion(
+            github_discussion_id="D_latest",
+            source_id=source.id,
+            repo_full_name="vercel/next.js",
+            discussion_number=20,
+            title="Latest known discussion",
+            comments_count=1,
+            upvote_count=1,
+            html_url="https://github.com/vercel/next.js/discussions/20",
+            discussion_created_at=latest_created_at,
+            discussion_updated_at=latest_created_at,
+            created_at=latest_created_at,
+            is_tracked=True,
+            is_deleted=False,
+            metric_tier="very_low",
+        )
+        db.add(discussion)
+        db.flush()
+        db.add(
+            SourceDiscussion(
+                source_id=source.id,
+                discussion_id=discussion.id,
+                first_seen_at=latest_created_at,
+                last_seen_at=latest_created_at,
+            )
+        )
+        db.commit()
+        db.refresh(source)
+        monkeypatch.setattr("app.services.scraper.utcnow", lambda: now)
+
+        client = RecordingGitHubClient()
+        job = ScraperService(client).scrape_source(db, source, job_type="new_discussions")
+
+        assert job.status == "done"
+        assert client.calls[0]["created_since"] == latest_created_at + timedelta(
+            microseconds=1
+        )
+    finally:
+        db.close()
+
+
+def test_new_discussions_uses_repo_specific_latest_boundary_for_organization_repos(
+    tmp_path,
+    monkeypatch,
+):
+    session_factory = make_test_session(tmp_path)
+    db = session_factory()
+    now = datetime(2026, 7, 14, 10, 0, 0)
+    latest_next = datetime(2026, 7, 14, 9, 45, 0)
+    latest_turbo = datetime(2026, 7, 14, 8, 15, 0)
+    try:
+        source = Source(
+            source_type="organization_repositories",
+            identifier="vercel",
+            is_active=True,
+            is_accessible=True,
+            include_comments=False,
+            created_at=now,
+        )
+        db.add(source)
+        db.flush()
+        discussions = [
+            Discussion(
+                github_discussion_id="D_next_latest",
+                source_id=source.id,
+                repo_full_name="vercel/next.js",
+                discussion_number=30,
+                title="Latest Next.js",
+                comments_count=1,
+                upvote_count=1,
+                html_url="https://github.com/vercel/next.js/discussions/30",
+                discussion_created_at=latest_next,
+                discussion_updated_at=latest_next,
+                created_at=latest_next,
+                is_tracked=True,
+                is_deleted=False,
+                metric_tier="very_low",
+            ),
+            Discussion(
+                github_discussion_id="D_turbo_latest",
+                source_id=source.id,
+                repo_full_name="vercel/turborepo",
+                discussion_number=40,
+                title="Latest Turborepo",
+                comments_count=1,
+                upvote_count=1,
+                html_url="https://github.com/vercel/turborepo/discussions/40",
+                discussion_created_at=latest_turbo,
+                discussion_updated_at=latest_turbo,
+                created_at=latest_turbo,
+                is_tracked=True,
+                is_deleted=False,
+                metric_tier="very_low",
+            ),
+        ]
+        db.add_all(discussions)
+        db.flush()
+        db.add_all(
+            [
+                SourceDiscussion(
+                    source_id=source.id,
+                    discussion_id=discussion.id,
+                    first_seen_at=discussion.discussion_created_at,
+                    last_seen_at=discussion.discussion_created_at,
+                )
+                for discussion in discussions
+            ]
+        )
+        db.commit()
+        db.refresh(source)
+        monkeypatch.setattr("app.services.scraper.utcnow", lambda: now)
+
+        client = RecordingOrganizationRepositoriesClient()
+        job = ScraperService(client).scrape_source(db, source, job_type="new_discussions")
+
+        assert job.status == "done"
+        assert client.calls == [
+            {
+                "owner": "vercel",
+                "repo": "next.js",
+                "created_since": latest_next + timedelta(microseconds=1),
+                "include_comments": False,
+            },
+            {
+                "owner": "vercel",
+                "repo": "turborepo",
+                "created_since": latest_turbo + timedelta(microseconds=1),
+                "include_comments": False,
+            },
+        ]
     finally:
         db.close()
 

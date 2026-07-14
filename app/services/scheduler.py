@@ -6,7 +6,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
-from app.db.models import Discussion, Source
+from app.db.models import Discussion, Source, SourceDiscussion
 from app.db.session import SessionLocal
 from app.services.scraper import ScraperService, utcnow
 from app.services.source_parser import (
@@ -50,7 +50,15 @@ def _due_source_ids(db, now):
 def _due_metrics_count(db, now) -> int:
     return (
         db.scalar(
-            select(func.count(Discussion.id)).where(
+            select(func.count(func.distinct(Discussion.id)))
+            .select_from(Discussion)
+            .join(
+                SourceDiscussion,
+                SourceDiscussion.discussion_id == Discussion.id,
+            )
+            .join(Source, Source.id == SourceDiscussion.source_id)
+            .where(
+                Source.is_active.is_(True),
                 Discussion.is_tracked.is_(True),
                 Discussion.next_metric_update <= now,
             )

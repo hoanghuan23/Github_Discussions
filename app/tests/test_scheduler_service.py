@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
-from app.db.models import Discussion, Source
+from app.db.models import Discussion, Source, SourceDiscussion
 from app.services.scheduler import run_due_once
 from app.tests.helpers import make_test_session
 
@@ -38,24 +38,32 @@ def test_run_due_once_scrapes_due_sources_and_runs_due_metrics(
         )
         db.add_all([due_source, future_source])
         db.flush()
+        discussion = Discussion(
+            github_discussion_id="D_due",
+            source_id=due_source.id,
+            repo_full_name="vercel/next.js",
+            discussion_number=10,
+            title="Due discussion",
+            comments_count=1,
+            upvote_count=1,
+            html_url="https://github.com/vercel/next.js/discussions/10",
+            discussion_created_at=now,
+            discussion_updated_at=now,
+            created_at=now,
+            is_tracked=True,
+            is_deleted=False,
+            last_metric_update=now - timedelta(hours=1),
+            next_metric_update=now - timedelta(seconds=1),
+            metric_tier="very_low",
+        )
+        db.add(discussion)
+        db.flush()
         db.add(
-            Discussion(
-                github_discussion_id="D_due",
+            SourceDiscussion(
                 source_id=due_source.id,
-                repo_full_name="vercel/next.js",
-                discussion_number=10,
-                title="Due discussion",
-                comments_count=1,
-                upvote_count=1,
-                html_url="https://github.com/vercel/next.js/discussions/10",
-                discussion_created_at=now,
-                discussion_updated_at=now,
-                created_at=now,
-                is_tracked=True,
-                is_deleted=False,
-                last_metric_update=now - timedelta(hours=1),
-                next_metric_update=now - timedelta(seconds=1),
-                metric_tier="very_low",
+                discussion_id=discussion.id,
+                first_seen_at=now,
+                last_seen_at=now,
             )
         )
         db.commit()

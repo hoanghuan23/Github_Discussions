@@ -32,6 +32,13 @@ class GitHubDiscussion:
 
 
 @dataclass(frozen=True)
+class GitHubDiscussionMetrics:
+    github_discussion_id: str
+    comments_count: int
+    upvote_count: int
+
+
+@dataclass(frozen=True)
 class GitHubRepository:
     name: str
     name_with_owner: str
@@ -127,6 +134,20 @@ query($owner: String!, $repo: String!, $number: Int!, $commentsFirst: Int!) {
           }
         }
       }
+    }
+  }
+}
+"""
+
+DISCUSSION_METRICS_BY_ID_QUERY = """
+query($discussionId: ID!) {
+    node(id: $discussionId) {
+    ... on Discussion {
+      id
+      comments {
+        totalCount
+      }
+      upvoteCount
     }
   }
 }
@@ -325,3 +346,37 @@ class GitHubGraphQLClient:
             raise RuntimeError("GitHub discussion not found or inaccessible")
 
         return self._parse_discussion(repository["nameWithOwner"], discussion)
+
+    def fetch_discussion_metrics_by_id(
+        self,
+        github_discussion_id: str,
+    ) -> GitHubDiscussionMetrics:
+        if not self.token:
+            raise RuntimeError("GITHUB_TOKEN is required to crawl GitHub Discussions")
+
+        response = requests.post(
+            self.endpoint,
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "query": DISCUSSION_METRICS_BY_ID_QUERY,
+                "variables": {"discussionId": github_discussion_id},
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("errors"):
+            raise RuntimeError(data["errors"])
+
+        discussion = data.get("data", {}).get("node")
+        if discussion is None:
+            raise RuntimeError("GitHub discussion not found or inaccessible")
+
+        return GitHubDiscussionMetrics(
+            github_discussion_id=discussion["id"],
+            comments_count=discussion["comments"]["totalCount"],
+            upvote_count=discussion["upvoteCount"],
+        )

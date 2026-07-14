@@ -6,9 +6,19 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.db.models import Discussion, PipelineJob, Source
+from app.db.models import (
+    Discussion,
+    DiscussionMetric,
+    PipelineJob,
+    Source,
+    SourceDiscussion,
+)
 from app.repositories.analytics import refresh_source_analytics_cache
-from app.repositories.discussions import upsert_discussion
+from app.repositories.discussions import (
+    METRIC_UPDATE_INTERVAL_MINUTES,
+    metric_tier,
+    upsert_discussion,
+)
 from app.services.github_client import GitHubGraphQLClient
 from app.services.source_parser import (
     SOURCE_TYPE_ORGANIZATION_DISCUSSIONS,
@@ -71,13 +81,20 @@ class ScraperService:
                 source.source_type,
                 settings.github_page_size,
             )
-            created_since = now - timedelta(hours=settings.lookback_hours)
+            lookback_since = now - timedelta(hours=settings.lookback_hours)
             if source.source_type == SOURCE_TYPE_ORGANIZATION_REPOSITORIES:
                 repositories = self.client.fetch_discussion_enabled_repositories(
                     source.identifier
                 )
                 for repository in repositories:
                     owner, repo = split_repo_identifier(repository.name_with_owner)
+                    created_since = self._created_since_for_new_discussions(
+                        db,
+                        source,
+                        lookback_since,
+                        job_type,
+                        repo_full_name=repository.name_with_owner,
+                    )
                     try:
                         items = self.client.fetch_recent_discussions(
                             owner,
@@ -93,9 +110,18 @@ class ScraperService:
             else:
                 if source.source_type == SOURCE_TYPE_REPOSITORY:
                     owner, repo = split_repo_identifier(source.identifier)
+                    repo_full_name = source.identifier
                 else:
                     owner = source.identifier
                     repo = source.identifier
+                    repo_full_name = None
+                created_since = self._created_since_for_new_discussions(
+                    db,
+                    source,
+                    lookback_since,
+                    job_type,
+                    repo_full_name=repo_full_name,
+                )
                 items = self.client.fetch_recent_discussions(
                     owner,
                     repo,
@@ -136,6 +162,48 @@ class ScraperService:
             )
             raise
 
+    def _created_since_for_new_discussions(
+        self,
+        db: Session,
+        source: Source,
+        lookback_since: datetime,
+        job_type: str,
+        repo_full_name: str | None = None,
+    ) -> datetime:
+        if job_type != "new_discussions":
+            return lookback_since
+
+        latest_created_at = self._latest_discussion_created_at(
+            db,
+            source,
+            repo_full_name=repo_full_name,
+        )
+        if latest_created_at is None:
+            return lookback_since
+
+        latest_boundary = latest_created_at + timedelta(microseconds=1)
+        return max(lookback_since, latest_boundary)
+
+    def _latest_discussion_created_at(
+        self,
+        db: Session,
+        source: Source,
+        repo_full_name: str | None = None,
+    ) -> datetime | None:
+        stmt = (
+            select(Discussion.discussion_created_at)
+            .join(
+                SourceDiscussion,
+                SourceDiscussion.discussion_id == Discussion.id,
+            )
+            .where(SourceDiscussion.source_id == source.id)
+            .order_by(Discussion.discussion_created_at.desc())
+            .limit(1)
+        )
+        if repo_full_name is not None:
+            stmt = stmt.where(Discussion.repo_full_name == repo_full_name)
+        return db.scalar(stmt)
+
     def _upsert_items(
         self,
         db: Session,
@@ -175,10 +243,18 @@ class ScraperService:
         db.flush()
 
         due_discussions = db.scalars(
-            select(Discussion).where(
+            select(Discussion)
+            .join(
+                SourceDiscussion,
+                SourceDiscussion.discussion_id == Discussion.id,
+            )
+            .join(Source, Source.id == SourceDiscussion.source_id)
+            .where(
+                Source.is_active.is_(True),
                 Discussion.is_tracked.is_(True),
                 Discussion.next_metric_update <= now,
             )
+            .distinct()
         ).all()
 
         try:
@@ -190,20 +266,15 @@ class ScraperService:
             for discussion in due_discussions:
                 try:
                     with db.begin_nested():
-                        owner, repo = split_repo_identifier(discussion.repo_full_name)
-                        item = self.client.fetch_discussion_by_number(
-                            owner,
-                            repo,
-                            discussion.discussion_number,
-                            include_comments=False,
+                        metrics = self.client.fetch_discussion_metrics_by_id(
+                            discussion.github_discussion_id
                         )
-                        upsert_discussion(
+                        self._update_discussion_metrics(
                             db,
-                            source_id=discussion.source_id,
-                            item=item,
-                            job_id=job.id,
-                            now=now,
-                            include_comments=False,
+                            discussion,
+                            metrics,
+                            job.id,
+                            now,
                         )
                 except SQLAlchemyError:
                     raise
@@ -216,8 +287,9 @@ class ScraperService:
                         discussion.discussion_number,
                     )
                     continue
-                if discussion.source_id is not None:
-                    affected_source_ids.add(discussion.source_id)
+                affected_source_ids.update(
+                    self._source_ids_for_discussion(db, discussion.id)
+                )
                 job.discussions_found += 1
                 job.discussions_updated += 1
 
@@ -245,3 +317,40 @@ class ScraperService:
             db.refresh(job)
             metrics_logger.exception("Loi cap nhat metrics")
             raise
+
+    def _update_discussion_metrics(
+        self,
+        db: Session,
+        discussion: Discussion,
+        metrics,
+        job_id: int,
+        now: datetime,
+    ) -> None:
+        tier = metric_tier(metrics.comments_count, metrics.upvote_count)
+
+        discussion.comments_count = metrics.comments_count
+        discussion.upvote_count = metrics.upvote_count
+        discussion.last_metric_update = now
+        discussion.next_metric_update = now + timedelta(
+            minutes=METRIC_UPDATE_INTERVAL_MINUTES[tier]
+        )
+        discussion.metric_tier = tier
+
+        db.add(
+            DiscussionMetric(
+                discussion_id=discussion.id,
+                comments_count=metrics.comments_count,
+                upvote_count=metrics.upvote_count,
+                recorded_at=now,
+                job_id=job_id,
+            )
+        )
+
+    def _source_ids_for_discussion(self, db: Session, discussion_id: int) -> set[int]:
+        return set(
+            db.scalars(
+                select(SourceDiscussion.source_id).where(
+                    SourceDiscussion.discussion_id == discussion_id
+                )
+            ).all()
+        )
