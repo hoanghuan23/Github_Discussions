@@ -20,12 +20,7 @@ class Settings:
     )
     github_page_size: int = int(os.getenv("GITHUB_PAGE_SIZE", "50"))
     lookback_hours: int = int(os.getenv("LOOKBACK_HOURS", "24"))
-    default_scrape_interval_minutes: int = int(
-        os.getenv("DEFAULT_SCRAPE_INTERVAL_MINUTES", "60")
-    )
-    default_metric_interval_minutes: int = int(
-        os.getenv("DEFAULT_METRIC_INTERVAL_MINUTES", "60")
-    )
+    scheduler_interval_seconds: int = int(os.getenv("SCHEDULER_INTERVAL_SECONDS", "60"))
 
 
 settings = Settings()

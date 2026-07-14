@@ -6,14 +6,6 @@ SOURCE_TYPE_ORGANIZATION_REPOSITORIES = "organization_repositories"
 SOURCE_TYPE_ORGANIZATION_DISCUSSIONS = "organization_discussions"
 SOURCE_TYPE_CATEGORY = "category"
 
-SOURCE_TYPES = {
-    SOURCE_TYPE_REPOSITORY,
-    SOURCE_TYPE_ORGANIZATION_REPOSITORIES,
-    SOURCE_TYPE_ORGANIZATION_DISCUSSIONS,
-    SOURCE_TYPE_CATEGORY,
-}
-
-
 def parse_source(value: str) -> tuple[str, str]:
     candidate = value.strip().removesuffix("/")
     if candidate.startswith("http://") or candidate.startswith("https://"):

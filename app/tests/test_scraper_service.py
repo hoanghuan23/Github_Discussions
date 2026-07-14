@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.db.models import (
     AnalyticsCache,
+    Discussion,
     DiscussionMetric,
     PipelineJob,
     Source,
@@ -104,6 +105,31 @@ class SequencedGitHubClient:
         return [item]
 
 
+class PartiallyFailingMetricClient:
+    def fetch_discussion_by_number(
+        self,
+        owner,
+        repo,
+        discussion_number,
+        include_comments=False,
+    ):
+        if discussion_number == 1:
+            raise RuntimeError("temporary GitHub error")
+        return GitHubDiscussion(
+            github_discussion_id="D_metric_success",
+            repo_full_name="vercel/next.js",
+            discussion_number=2,
+            title="Metric success updated",
+            author_login="octocat",
+            category_name="General",
+            comments_count=12,
+            upvote_count=8,
+            html_url="https://github.com/vercel/next.js/discussions/2",
+            discussion_created_at=datetime(2026, 1, 1),
+            discussion_updated_at=datetime(2026, 1, 3),
+        )
+
+
 def test_scrape_source_upserts_discussion_metric_mapping_and_job(tmp_path):
     session_factory = make_test_session(tmp_path)
     db = session_factory()
@@ -123,11 +149,87 @@ def test_scrape_source_upserts_discussion_metric_mapping_and_job(tmp_path):
         job = ScraperService(FakeGitHubClient()).scrape_source(db, source)
 
         assert job.status == "done"
+        assert job.job_type == "new_discussions"
         assert job.discussions_found == 1
         assert job.discussions_new == 1
         assert db.query(DiscussionMetric).count() == 1
         assert db.query(SourceDiscussion).count() == 1
         assert db.query(PipelineJob).count() == 1
+    finally:
+        db.close()
+
+
+def test_update_due_metrics_continues_after_discussion_error(tmp_path, monkeypatch):
+    session_factory = make_test_session(tmp_path)
+    db = session_factory()
+    now = datetime(2026, 7, 14, 10, 0, 0)
+    try:
+        source = Source(
+            source_type="repository",
+            identifier="vercel/next.js",
+            is_active=True,
+            is_accessible=True,
+            include_comments=False,
+            created_at=now,
+        )
+        db.add(source)
+        db.flush()
+        db.add_all(
+            [
+                Discussion(
+                    github_discussion_id="D_metric_fail",
+                    source_id=source.id,
+                    repo_full_name="vercel/next.js",
+                    discussion_number=1,
+                    title="Metric fail",
+                    comments_count=1,
+                    upvote_count=1,
+                    html_url="https://github.com/vercel/next.js/discussions/1",
+                    discussion_created_at=now - timedelta(days=1),
+                    discussion_updated_at=now - timedelta(days=1),
+                    created_at=now - timedelta(days=1),
+                    is_tracked=True,
+                    is_deleted=False,
+                    last_metric_update=now - timedelta(hours=2),
+                    next_metric_update=now - timedelta(seconds=1),
+                    metric_tier="very_low",
+                ),
+                Discussion(
+                    github_discussion_id="D_metric_success",
+                    source_id=source.id,
+                    repo_full_name="vercel/next.js",
+                    discussion_number=2,
+                    title="Metric success",
+                    comments_count=2,
+                    upvote_count=2,
+                    html_url="https://github.com/vercel/next.js/discussions/2",
+                    discussion_created_at=now - timedelta(days=1),
+                    discussion_updated_at=now - timedelta(days=1),
+                    created_at=now - timedelta(days=1),
+                    is_tracked=True,
+                    is_deleted=False,
+                    last_metric_update=now - timedelta(hours=2),
+                    next_metric_update=now - timedelta(seconds=1),
+                    metric_tier="very_low",
+                ),
+            ]
+        )
+        db.commit()
+        monkeypatch.setattr("app.services.scraper.utcnow", lambda: now)
+
+        job = ScraperService(PartiallyFailingMetricClient()).update_due_metrics(db)
+
+        success = (
+            db.query(Discussion)
+            .filter(Discussion.github_discussion_id == "D_metric_success")
+            .one()
+        )
+        assert job.status == "done"
+        assert job.discussions_found == 1
+        assert job.discussions_updated == 1
+        assert job.items_failed == 1
+        assert success.comments_count == 12
+        assert db.query(DiscussionMetric).count() == 1
     finally:
         db.close()
 
@@ -256,6 +358,7 @@ def test_scrape_organization_discussions_source_upserts_metrics(tmp_path):
         job = ScraperService(FakeOrganizationGitHubClient()).scrape_source(db, source)
 
         assert job.status == "done"
+        assert job.job_type == "new_discussions"
         assert job.discussions_found == 1
         assert job.discussions_new == 1
         assert db.query(DiscussionMetric).count() == 1
@@ -288,6 +391,7 @@ def test_scrape_organization_repositories_checks_repos_and_upserts_recent_metric
         ).scrape_source(db, source)
 
         assert job.status == "done"
+        assert job.job_type == "new_discussions"
         assert job.discussions_found == 1
         assert job.discussions_new == 1
         assert job.items_failed == 0

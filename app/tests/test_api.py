@@ -81,10 +81,11 @@ def test_create_source_reuses_existing_identifier(tmp_path, monkeypatch):
             db.close()
 
     class FakeScraperService:
-        def scrape_source(self, db, source):
+        def scrape_source(self, db, source, job_type="new_discussions"):
+            assert job_type == "scrape_discussions"
             now = datetime.now(UTC).replace(tzinfo=None)
             job = PipelineJob(
-                job_type="scrape_discussions",
+                job_type=job_type,
                 source_id=source.id,
                 status="done",
                 created_at=now,
@@ -165,6 +166,7 @@ def test_create_source_crawls_discussions_and_metrics(tmp_path, monkeypatch):
         assert response.status_code == 200
         body = response.json()
         assert body["job"]["status"] == "done"
+        assert body["job"]["job_type"] == "scrape_discussions"
         assert body["job"]["discussions_found"] == 1
         assert body["job"]["discussions_new"] == 1
 
@@ -228,6 +230,7 @@ def test_create_source_crawls_organization_discussions(tmp_path, monkeypatch):
         assert response.status_code == 200
         body = response.json()
         assert body["job"]["status"] == "done"
+        assert body["job"]["job_type"] == "scrape_discussions"
         assert body["job"]["discussions_found"] == 1
         assert body["source"]["source_type"] == "organization_discussions"
         assert body["source"]["identifier"] == "community"
@@ -300,6 +303,7 @@ def test_create_source_crawls_organization_repositories(tmp_path, monkeypatch):
         assert response.status_code == 200
         body = response.json()
         assert body["job"]["status"] == "done"
+        assert body["job"]["job_type"] == "scrape_discussions"
         assert body["job"]["discussions_found"] == 1
         assert body["source"]["source_type"] == "organization_repositories"
         assert body["source"]["identifier"] == "vercel"

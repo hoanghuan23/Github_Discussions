@@ -67,7 +67,11 @@ def create_source(payload: SourceCreate, db: Session = Depends(get_db)):
         SOURCE_TYPE_ORGANIZATION_REPOSITORIES,
     }:
         try:
-            job = ScraperService().scrape_source(db, source)
+            job = ScraperService().scrape_source(
+                db,
+                source,
+                job_type="scrape_discussions",
+            )
         except Exception as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
     else:
@@ -102,7 +106,7 @@ def scrape_source(source_id: int, db: Session = Depends(get_db)):
     if source is None:
         raise HTTPException(status_code=404, detail="Source not found")
     try:
-        job = ScraperService().scrape_source(db, source)
+        job = ScraperService().scrape_source(db, source, job_type="new_discussions")
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     db.refresh(source)

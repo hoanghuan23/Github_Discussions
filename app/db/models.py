@@ -121,8 +121,7 @@ class PipelineJob(Base):
     __tablename__ = "pipeline_jobs"
     __table_args__ = (
         CheckConstraint(
-            "job_type IN ('scrape_discussions', 'scrape_new_discussions', "
-            "'update_metrics', 'scrape_comments', 'sync_repos')",
+            "job_type IN ('scrape_discussions', 'new_discussions', 'update_metrics')",
             name="ck_pipeline_jobs_job_type",
         ),
         CheckConstraint(

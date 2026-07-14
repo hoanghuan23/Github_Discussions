@@ -139,10 +139,8 @@ CREATE TABLE pipeline_jobs (
     job_type VARCHAR(30) NOT NULL DEFAULT 'scrape_discussions'
         CHECK (job_type IN (
             'scrape_discussions',
-            'scrape_new_discussions',
-            'update_metrics',
-            'scrape_comments',
-            'sync_repos'
+            'new_discussions',
+            'update_metrics'
         )),
 
     source_id INTEGER REFERENCES sources(id) ON DELETE SET NULL,

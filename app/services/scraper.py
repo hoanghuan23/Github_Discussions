@@ -1,6 +1,8 @@
+import logging
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -16,6 +18,10 @@ from app.services.source_parser import (
 )
 
 
+scraper_logger = logging.getLogger("github_discussions.scraper")
+metrics_logger = logging.getLogger("github_discussions.metrics")
+
+
 def utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
@@ -24,7 +30,12 @@ class ScraperService:
     def __init__(self, client: GitHubGraphQLClient | None = None):
         self.client = client or GitHubGraphQLClient()
 
-    def scrape_source(self, db: Session, source: Source) -> PipelineJob:
+    def scrape_source(
+        self,
+        db: Session,
+        source: Source,
+        job_type: str = "new_discussions",
+    ) -> PipelineJob:
         if source.source_type not in {
             SOURCE_TYPE_REPOSITORY,
             SOURCE_TYPE_ORGANIZATION_DISCUSSIONS,
@@ -34,10 +45,12 @@ class ScraperService:
                 "Scraping only supports repository, organization discussions, "
                 "and organization repositories"
             )
+        if job_type not in {"scrape_discussions", "new_discussions"}:
+            raise ValueError("Discussion scraping job_type is not supported")
 
         now = utcnow()
         job = PipelineJob(
-            job_type="scrape_discussions",
+            job_type=job_type,
             source_id=source.id,
             status="running",
             discussions_found=0,
@@ -51,6 +64,13 @@ class ScraperService:
         db.flush()
 
         try:
+            scraper_logger.info(
+                "Bat dau scrape bai moi | source=%s id=%s type=%s max_count=%s",
+                source.identifier,
+                source.id,
+                source.source_type,
+                settings.github_page_size,
+            )
             created_since = now - timedelta(hours=settings.lookback_hours)
             if source.source_type == SOURCE_TYPE_ORGANIZATION_REPOSITORIES:
                 repositories = self.client.fetch_discussion_enabled_repositories(
@@ -91,6 +111,15 @@ class ScraperService:
             job.finished_at = utcnow()
             db.commit()
             db.refresh(job)
+            scraper_logger.info(
+                "Hoan tat scrape bai moi | source=%s id=%s found=%s new=%s updated=%s failed=%s",
+                source.identifier,
+                source.id,
+                job.discussions_found,
+                job.discussions_new,
+                job.discussions_updated,
+                job.items_failed,
+            )
             return job
         except Exception as exc:
             source.is_accessible = False
@@ -99,6 +128,12 @@ class ScraperService:
             job.finished_at = utcnow()
             db.commit()
             db.refresh(job)
+            scraper_logger.exception(
+                "Loi scrape bai moi | source=%s id=%s type=%s",
+                source.identifier,
+                source.id,
+                source.source_type,
+            )
             raise
 
     def _upsert_items(
@@ -147,23 +182,40 @@ class ScraperService:
         ).all()
 
         try:
+            metrics_logger.info(
+                "Bat dau cap nhat metrics | discussions_due=%s",
+                len(due_discussions),
+            )
             affected_source_ids = set()
             for discussion in due_discussions:
-                owner, repo = split_repo_identifier(discussion.repo_full_name)
-                item = self.client.fetch_discussion_by_number(
-                    owner,
-                    repo,
-                    discussion.discussion_number,
-                    include_comments=False,
-                )
-                upsert_discussion(
-                    db,
-                    source_id=discussion.source_id,
-                    item=item,
-                    job_id=job.id,
-                    now=now,
-                    include_comments=False,
-                )
+                try:
+                    with db.begin_nested():
+                        owner, repo = split_repo_identifier(discussion.repo_full_name)
+                        item = self.client.fetch_discussion_by_number(
+                            owner,
+                            repo,
+                            discussion.discussion_number,
+                            include_comments=False,
+                        )
+                        upsert_discussion(
+                            db,
+                            source_id=discussion.source_id,
+                            item=item,
+                            job_id=job.id,
+                            now=now,
+                            include_comments=False,
+                        )
+                except SQLAlchemyError:
+                    raise
+                except Exception:
+                    job.items_failed += 1
+                    metrics_logger.exception(
+                        "Loi cap nhat metrics | discussion_id=%s repo=%s number=%s",
+                        discussion.id,
+                        discussion.repo_full_name,
+                        discussion.discussion_number,
+                    )
+                    continue
                 if discussion.source_id is not None:
                     affected_source_ids.add(discussion.source_id)
                 job.discussions_found += 1
@@ -178,6 +230,11 @@ class ScraperService:
             job.finished_at = utcnow()
             db.commit()
             db.refresh(job)
+            metrics_logger.info(
+                "Hoan tat cap nhat metrics | updated=%s failed=%s",
+                job.discussions_updated,
+                job.items_failed,
+            )
             return job
         except Exception as exc:
             job.status = "failed"
@@ -186,4 +243,5 @@ class ScraperService:
             job.finished_at = utcnow()
             db.commit()
             db.refresh(job)
+            metrics_logger.exception("Loi cap nhat metrics")
             raise
