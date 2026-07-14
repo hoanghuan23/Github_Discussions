@@ -14,7 +14,7 @@ def test_run_due_once_scrapes_due_sources_and_runs_due_metrics(
 ):
     session_factory = make_test_session(tmp_path)
     now = datetime(2026, 7, 14, 9, 32, 0)
-    calls = {"scraped": [], "metrics": 0}
+    calls = {"scraped": [], "metrics": []}
 
     db = session_factory()
     try:
@@ -80,8 +80,8 @@ def test_run_due_once_scrapes_due_sources_and_runs_due_metrics(
                 items_failed=0,
             )
 
-        def update_due_metrics(self, db):
-            calls["metrics"] += 1
+        def update_due_metrics(self, db, source=None):
+            calls["metrics"].append(source.identifier)
             return SimpleNamespace(
                 discussions_found=1,
                 discussions_updated=1,
@@ -95,7 +95,10 @@ def test_run_due_once_scrapes_due_sources_and_runs_due_metrics(
             scraper_factory=FakeScraperService,
         )
 
-    assert calls == {"scraped": [("vercel/next.js", "new_discussions")], "metrics": 1}
+    assert calls == {
+        "scraped": [("vercel/next.js", "new_discussions")],
+        "metrics": ["vercel/next.js"],
+    }
     assert result.sources_due == 1
     assert result.metrics_due == 1
     assert result.sources_processed == 1
@@ -105,4 +108,7 @@ def test_run_due_once_scrapes_due_sources_and_runs_due_metrics(
         "Hoan tat scrape bai moi | source=vercel/next.js id=1 found=2 new=1 updated=1 failed=0"
         in caplog.text
     )
-    assert "Hoan tat cap nhat metrics | updated=1 failed=0" in caplog.text
+    assert (
+        "Hoan tat cap nhat metrics | source=vercel/next.js id=1 updated=1 failed=0"
+        in caplog.text
+    )

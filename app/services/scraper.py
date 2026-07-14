@@ -227,10 +227,15 @@ class ScraperService:
             else:
                 job.discussions_updated += 1
 
-    def update_due_metrics(self, db: Session) -> PipelineJob:
+    def update_due_metrics(
+        self,
+        db: Session,
+        source: Source | None = None,
+    ) -> PipelineJob:
         now = utcnow()
         job = PipelineJob(
             job_type="update_metrics",
+            source_id=source.id if source is not None else None,
             status="running",
             discussions_found=0,
             discussions_new=0,
@@ -242,7 +247,7 @@ class ScraperService:
         db.add(job)
         db.flush()
 
-        due_discussions = db.scalars(
+        due_query = (
             select(Discussion)
             .join(
                 SourceDiscussion,
@@ -255,14 +260,18 @@ class ScraperService:
                 Discussion.next_metric_update <= now,
             )
             .distinct()
-        ).all()
+        )
+        if source is not None:
+            due_query = due_query.where(SourceDiscussion.source_id == source.id)
+
+        due_discussions = db.scalars(due_query).all()
 
         try:
             metrics_logger.info(
                 "Bat dau cap nhat metrics | discussions_due=%s",
                 len(due_discussions),
             )
-            affected_source_ids = set()
+            affected_source_ids = {source.id} if source is not None else set()
             for discussion in due_discussions:
                 try:
                     with db.begin_nested():

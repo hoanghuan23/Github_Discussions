@@ -252,7 +252,10 @@ def test_update_due_metrics_continues_after_discussion_error(tmp_path, monkeypat
         db.commit()
         monkeypatch.setattr("app.services.scraper.utcnow", lambda: now)
 
-        job = ScraperService(PartiallyFailingMetricClient()).update_due_metrics(db)
+        job = ScraperService(PartiallyFailingMetricClient()).update_due_metrics(
+            db,
+            source,
+        )
 
         success = (
             db.query(Discussion)
@@ -260,6 +263,7 @@ def test_update_due_metrics_continues_after_discussion_error(tmp_path, monkeypat
             .one()
         )
         assert job.status == "done"
+        assert job.source_id == source.id
         assert job.discussions_found == 1
         assert job.discussions_updated == 1
         assert job.items_failed == 1

@@ -67,6 +67,21 @@ def _due_metrics_count(db, now) -> int:
     )
 
 
+def _due_metric_source_ids(db, now):
+    return db.scalars(
+        select(Source.id)
+        .join(SourceDiscussion, SourceDiscussion.source_id == Source.id)
+        .join(Discussion, Discussion.id == SourceDiscussion.discussion_id)
+        .where(
+            Source.is_active.is_(True),
+            Discussion.is_tracked.is_(True),
+            Discussion.next_metric_update <= now,
+        )
+        .distinct()
+        .order_by(Source.id)
+    ).all()
+
+
 def run_due_once(
     session_factory: sessionmaker = SessionLocal,
     scraper_factory=ScraperService,
@@ -75,6 +90,7 @@ def run_due_once(
     with session_factory() as db:
         source_ids = _due_source_ids(db, now)
         metrics_due = _due_metrics_count(db, now)
+        metric_source_ids = _due_metric_source_ids(db, now)
 
     sources_due = len(source_ids)
     logger.info(
@@ -134,25 +150,39 @@ def run_due_once(
                 job.items_failed,
             )
 
-    if metrics_due:
-        logger.info("Bat dau cap nhat metrics | discussions_due=%s", metrics_due)
+    if metric_source_ids:
+        logger.info(
+            "Bat dau cap nhat metrics | discussions_due=%s sources_due=%s",
+            metrics_due,
+            len(metric_source_ids),
+        )
+    for source_id in metric_source_ids:
         with session_factory() as db:
+            source = db.get(Source, source_id)
+            if source is None or not source.is_active:
+                posts_expired += 1
+                continue
+
             try:
-                job = scraper_factory().update_due_metrics(db)
+                job = scraper_factory().update_due_metrics(db, source)
             except Exception:
                 items_failed += 1
                 logger.exception(
-                    "Loi cap nhat metrics | discussions_due=%s",
-                    metrics_due,
+                    "Loi cap nhat metrics | source=%s id=%s",
+                    source.identifier,
+                    source_id,
                 )
-            else:
-                posts_processed += job.discussions_found
-                items_failed += job.items_failed
-                logger.info(
-                    "Hoan tat cap nhat metrics | updated=%s failed=%s",
-                    job.discussions_updated,
-                    job.items_failed,
-                )
+                continue
+
+            posts_processed += job.discussions_found
+            items_failed += job.items_failed
+            logger.info(
+                "Hoan tat cap nhat metrics | source=%s id=%s updated=%s failed=%s",
+                source.identifier,
+                source_id,
+                job.discussions_updated,
+                job.items_failed,
+            )
 
     logger.info(
         "Scheduler hoan tat chu ky | sources_processed=%s posts_processed=%s posts_expired=%s",
