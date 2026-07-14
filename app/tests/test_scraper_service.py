@@ -1,6 +1,12 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from app.db.models import DiscussionMetric, PipelineJob, Source, SourceDiscussion
+from app.db.models import (
+    AnalyticsCache,
+    DiscussionMetric,
+    PipelineJob,
+    Source,
+    SourceDiscussion,
+)
 from app.services.github_client import GitHubDiscussion, GitHubRepository
 from app.services.scraper import ScraperService
 from app.tests.helpers import make_test_session
@@ -85,6 +91,19 @@ class FakeOrganizationRepositoriesGitHubClient:
         return []
 
 
+class SequencedGitHubClient:
+    def __init__(self, items):
+        self.items = items
+        self.index = 0
+
+    def fetch_recent_discussions(self, owner, repo, created_since, include_comments=False):
+        assert owner == "vercel"
+        assert repo == "next.js"
+        item = self.items[self.index]
+        self.index += 1
+        return [item]
+
+
 def test_scrape_source_upserts_discussion_metric_mapping_and_job(tmp_path):
     session_factory = make_test_session(tmp_path)
     db = session_factory()
@@ -109,6 +128,111 @@ def test_scrape_source_upserts_discussion_metric_mapping_and_job(tmp_path):
         assert db.query(DiscussionMetric).count() == 1
         assert db.query(SourceDiscussion).count() == 1
         assert db.query(PipelineJob).count() == 1
+    finally:
+        db.close()
+
+
+def test_scrape_source_refreshes_daily_analytics_cache_and_source_tier(
+    tmp_path,
+    monkeypatch,
+):
+    session_factory = make_test_session(tmp_path)
+    db = session_factory()
+    crawl_times = [
+        datetime(2026, 7, 14, 10, 0, 0),
+        datetime(2026, 7, 14, 18, 0, 0),
+        datetime(2026, 7, 15, 10, 0, 0),
+    ]
+    items = [
+        GitHubDiscussion(
+            github_discussion_id="D_123",
+            repo_full_name="vercel/next.js",
+            discussion_number=10,
+            title="Test discussion",
+            author_login="octocat",
+            category_name="General",
+            comments_count=10,
+            upvote_count=16,
+            html_url="https://github.com/vercel/next.js/discussions/10",
+            discussion_created_at=datetime(2026, 1, 1),
+            discussion_updated_at=datetime(2026, 1, 2),
+        ),
+        GitHubDiscussion(
+            github_discussion_id="D_123",
+            repo_full_name="vercel/next.js",
+            discussion_number=10,
+            title="Test discussion updated",
+            author_login="octocat",
+            category_name="General",
+            comments_count=30,
+            upvote_count=80,
+            html_url="https://github.com/vercel/next.js/discussions/10",
+            discussion_created_at=datetime(2026, 1, 1),
+            discussion_updated_at=datetime(2026, 1, 2),
+        ),
+        GitHubDiscussion(
+            github_discussion_id="D_123",
+            repo_full_name="vercel/next.js",
+            discussion_number=10,
+            title="Test discussion next day",
+            author_login="octocat",
+            category_name="General",
+            comments_count=100,
+            upvote_count=100,
+            html_url="https://github.com/vercel/next.js/discussions/10",
+            discussion_created_at=datetime(2026, 1, 1),
+            discussion_updated_at=datetime(2026, 1, 2),
+        ),
+    ]
+
+    try:
+        source = Source(
+            source_type="repository",
+            identifier="vercel/next.js",
+            is_active=True,
+            is_accessible=True,
+            include_comments=False,
+            created_at=datetime.now(UTC).replace(tzinfo=None),
+        )
+        db.add(source)
+        db.commit()
+        db.refresh(source)
+
+        call_count = {"value": 0}
+
+        def fake_utcnow():
+            index = min(call_count["value"] // 2, len(crawl_times) - 1)
+            call_count["value"] += 1
+            return crawl_times[index]
+
+        monkeypatch.setattr("app.services.scraper.utcnow", fake_utcnow)
+        service = ScraperService(SequencedGitHubClient(items))
+
+        service.scrape_source(db, source)
+        first_cache = db.query(AnalyticsCache).one()
+        assert first_cache.date.isoformat() == "2026-07-14"
+        assert first_cache.total_discussions == 1
+        assert first_cache.total_comments == 10
+        assert first_cache.total_upvotes == 16
+        assert source.schedule_tier == 2
+        assert source.next_scrape == crawl_times[0] + timedelta(minutes=240)
+
+        service.scrape_source(db, source)
+        caches = db.query(AnalyticsCache).all()
+        assert len(caches) == 1
+        assert caches[0].total_comments == 30
+        assert caches[0].total_upvotes == 80
+        assert source.schedule_tier == 3
+        assert source.next_scrape == crawl_times[1] + timedelta(minutes=120)
+
+        service.scrape_source(db, source)
+        caches = db.query(AnalyticsCache).order_by(AnalyticsCache.date).all()
+        assert len(caches) == 2
+        assert caches[1].date.isoformat() == "2026-07-15"
+        assert caches[1].total_comments == 100
+        assert caches[1].total_upvotes == 100
+        assert source.schedule_tier == 4
+        assert source.next_scrape == crawl_times[2] + timedelta(minutes=60)
     finally:
         db.close()
 

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.models import Discussion, PipelineJob, Source
+from app.repositories.analytics import refresh_source_analytics_cache
 from app.repositories.discussions import upsert_discussion
 from app.services.github_client import GitHubGraphQLClient
 from app.services.source_parser import (
@@ -85,10 +86,7 @@ class ScraperService:
 
             source.is_accessible = True
             source.last_scraped = now
-            source.next_scrape = now + timedelta(
-                minutes=source.schedule_override_minutes
-                or settings.default_scrape_interval_minutes
-            )
+            refresh_source_analytics_cache(db, source, now)
             job.status = "done"
             job.finished_at = utcnow()
             db.commit()
@@ -149,6 +147,7 @@ class ScraperService:
         ).all()
 
         try:
+            affected_source_ids = set()
             for discussion in due_discussions:
                 owner, repo = split_repo_identifier(discussion.repo_full_name)
                 item = self.client.fetch_discussion_by_number(
@@ -165,8 +164,15 @@ class ScraperService:
                     now=now,
                     include_comments=False,
                 )
+                if discussion.source_id is not None:
+                    affected_source_ids.add(discussion.source_id)
                 job.discussions_found += 1
                 job.discussions_updated += 1
+
+            for source_id in affected_source_ids:
+                source = db.get(Source, source_id)
+                if source is not None:
+                    refresh_source_analytics_cache(db, source, now)
 
             job.status = "done"
             job.finished_at = utcnow()
