@@ -19,7 +19,10 @@ from app.repositories.discussions import (
     metric_tier,
     upsert_discussion,
 )
-from app.services.github_client import GitHubGraphQLClient
+from app.services.github_client import (
+    GitHubDiscussionNotFoundError,
+    GitHubGraphQLClient,
+)
 from app.services.source_parser import (
     SOURCE_TYPE_ORGANIZATION_DISCUSSIONS,
     SOURCE_TYPE_ORGANIZATION_REPOSITORIES,
@@ -287,6 +290,22 @@ class ScraperService:
                         )
                 except SQLAlchemyError:
                     raise
+                except GitHubDiscussionNotFoundError:
+                    discussion.is_tracked = False
+                    discussion.is_deleted = True
+                    discussion.next_metric_update = None
+                    affected_source_ids.update(
+                        self._source_ids_for_discussion(db, discussion.id)
+                    )
+                    metrics_logger.warning(
+                        "Discussion khong con ton tai, dung theo doi | "
+                        "discussion_id=%s repo=%s number=%s github_discussion_id=%s",
+                        discussion.id,
+                        discussion.repo_full_name,
+                        discussion.discussion_number,
+                        discussion.github_discussion_id,
+                    )
+                    continue
                 except Exception:
                     job.items_failed += 1
                     metrics_logger.exception(

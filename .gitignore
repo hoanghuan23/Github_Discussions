@@ -26,6 +26,7 @@ env/
 data/*.db
 data/*.sqlite
 data/*.sqlite3
+github_discussions.db-journal
 
 # Logs and runtime files
 *.log

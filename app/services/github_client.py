@@ -6,6 +6,10 @@ import requests
 from app.core.config import settings
 
 
+class GitHubDiscussionNotFoundError(RuntimeError):
+    """Raised when GitHub no longer resolves a discussion node."""
+
+
 @dataclass(frozen=True)
 class GitHubComment:
     github_comment_id: str
@@ -369,6 +373,8 @@ class GitHubGraphQLClient:
         response.raise_for_status()
         data = response.json()
         if data.get("errors"):
+            if _is_discussion_node_not_found(data["errors"]):
+                raise GitHubDiscussionNotFoundError(data["errors"])
             raise RuntimeError(data["errors"])
 
         discussion = data.get("data", {}).get("node")
@@ -380,3 +386,12 @@ class GitHubGraphQLClient:
             comments_count=discussion["comments"]["totalCount"],
             upvote_count=discussion["upvoteCount"],
         )
+
+
+def _is_discussion_node_not_found(errors) -> bool:
+    return any(
+        error.get("type") == "NOT_FOUND"
+        and "Could not resolve to a node" in error.get("message", "")
+        for error in errors
+        if isinstance(error, dict)
+    )

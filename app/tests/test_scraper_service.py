@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime, timedelta
 
 from app.db.models import (
@@ -10,6 +11,7 @@ from app.db.models import (
 )
 from app.services.github_client import (
     GitHubDiscussion,
+    GitHubDiscussionNotFoundError,
     GitHubDiscussionMetrics,
     GitHubRepository,
 )
@@ -154,6 +156,18 @@ class PartiallyFailingMetricClient:
         )
 
 
+class DeletedDiscussionMetricClient:
+    def fetch_discussion_metrics_by_id(self, github_discussion_id):
+        raise GitHubDiscussionNotFoundError(
+            [
+                {
+                    "type": "NOT_FOUND",
+                    "message": "Could not resolve to a node with the global id",
+                }
+            ]
+        )
+
+
 def test_scrape_source_upserts_discussion_metric_mapping_and_job(tmp_path):
     session_factory = make_test_session(tmp_path)
     db = session_factory()
@@ -273,6 +287,80 @@ def test_update_due_metrics_continues_after_discussion_error(tmp_path, monkeypat
         assert success.html_url == "https://github.com/vercel/next.js/discussions/2"
         assert success.discussion_number == 2
         assert db.query(DiscussionMetric).count() == 1
+    finally:
+        db.close()
+
+
+def test_update_due_metrics_marks_deleted_discussion_untracked(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    session_factory = make_test_session(tmp_path)
+    db = session_factory()
+    now = datetime(2026, 7, 14, 10, 0, 0)
+    try:
+        source = Source(
+            source_type="repository",
+            identifier="vercel/next.js",
+            is_active=True,
+            is_accessible=True,
+            include_comments=False,
+            created_at=now,
+        )
+        db.add(source)
+        db.flush()
+        discussion = Discussion(
+            github_discussion_id="D_deleted",
+            source_id=source.id,
+            repo_full_name="vercel/next.js",
+            discussion_number=20,
+            title="Deleted discussion",
+            comments_count=1,
+            upvote_count=1,
+            html_url="https://github.com/vercel/next.js/discussions/20",
+            discussion_created_at=now - timedelta(days=1),
+            discussion_updated_at=now - timedelta(days=1),
+            created_at=now - timedelta(days=1),
+            is_tracked=True,
+            is_deleted=False,
+            last_metric_update=now - timedelta(hours=2),
+            next_metric_update=now - timedelta(seconds=1),
+            metric_tier="very_low",
+        )
+        db.add(discussion)
+        db.flush()
+        db.add(
+            SourceDiscussion(
+                source_id=source.id,
+                discussion_id=discussion.id,
+                first_seen_at=discussion.discussion_created_at,
+                last_seen_at=discussion.discussion_created_at,
+            )
+        )
+        db.commit()
+        monkeypatch.setattr("app.services.scraper.utcnow", lambda: now)
+
+        with caplog.at_level(logging.WARNING, logger="github_discussions.metrics"):
+            job = ScraperService(DeletedDiscussionMetricClient()).update_due_metrics(
+                db,
+                source,
+            )
+
+        deleted = (
+            db.query(Discussion)
+            .filter(Discussion.github_discussion_id == "D_deleted")
+            .one()
+        )
+        assert job.status == "done"
+        assert job.items_failed == 0
+        assert job.discussions_found == 0
+        assert job.discussions_updated == 0
+        assert deleted.is_tracked is False
+        assert deleted.is_deleted is True
+        assert deleted.next_metric_update is None
+        assert db.query(DiscussionMetric).count() == 0
+        assert "Discussion khong con ton tai, dung theo doi" in caplog.text
     finally:
         db.close()
 
